@@ -268,8 +268,20 @@ class FreelanceHunterBot:
         self.analyzer = AIAnalyzer(OPENAI_API_KEY)
         self.notifier = NotificationBot(BOT_TOKEN, ADMIN_TELEGRAM_ID)
         
-        # Telethon userbot
-        self.userbot = TelegramClient('freelance_hunter', API_ID, API_HASH)
+        # Telethon userbot с поддержкой StringSession
+        from telethon.sessions import StringSession
+        
+        session_string = os.getenv('SESSION_STRING', '')
+        if session_string:
+            # Используем StringSession из переменной окружения (для Render)
+            logger.info("Используется StringSession из переменной окружения")
+            session = StringSession(session_string)
+        else:
+            # Используем файловую сессию (для локальной разработки)
+            logger.info("Используется файловая сессия userbot_session")
+            session = 'userbot_session'
+        
+        self.userbot = TelegramClient(session, API_ID, API_HASH)
         
         # Очередь для Producer-Consumer
         self.queue: asyncio.Queue[MessageData] = asyncio.Queue(maxsize=100)
