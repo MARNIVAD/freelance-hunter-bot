@@ -319,24 +319,40 @@ class FreelanceHunterBot:
             chat_id = event.chat_id
             message_id = message.id
             
+            # Получение информации о чате для логирования
+            chat = await event.get_chat()
+            chat_title = getattr(chat, 'title', 'Unknown')
+            chat_username = getattr(chat, 'username', None)
+            chat_identifier = f"@{chat_username}" if chat_username else f"ID:{chat_id}"
+            
+            # Превью текста для логов (первые 50 символов)
+            text_preview = message.text[:50] + "..." if len(message.text) > 50 else message.text
+            
+            # Логирование получения сообщения
+            logger.info(f"📨 Получено сообщение #{message_id} из {chat_identifier} ({chat_title}): \"{text_preview}\"")
+            
             # Проверка дедупликации
             if await self.db.is_processed(message_id, chat_id):
-                logger.debug(f"Сообщение {message_id} уже обработано")
+                logger.info(f"⏭️  Сообщение #{message_id} уже обработано ранее (дубликат в БД)")
                 return
             
             # Первичная фильтрация мусора
             if self.filter.is_spam(message.text):
-                logger.info(f"Сообщение {message_id} отфильтровано как спам")
+                # Определяем причину отсева
+                text_len = len(message.text)
+                if text_len < MIN_MESSAGE_LENGTH:
+                    logger.info(f"🗑️  Сообщение #{message_id} отфильтровано: слишком короткое ({text_len} < {MIN_MESSAGE_LENGTH} символов)")
+                else:
+                    text_lower = message.text.lower().strip()
+                    matched_keywords = [kw for kw in SPAM_KEYWORDS if kw in text_lower]
+                    logger.info(f"🗑️  Сообщение #{message_id} отфильтровано: стоп-слова {matched_keywords}")
+                
                 await self.db.mark_processed(message_id, chat_id)
                 return
             
-            # Получение информации о чате
-            chat = await event.get_chat()
-            chat_title = getattr(chat, 'title', 'Unknown')
-            
             # Формирование ссылки на сообщение
-            if hasattr(chat, 'username') and chat.username:
-                link = f"https://t.me/{chat.username}/{message_id}"
+            if chat_username:
+                link = f"https://t.me/{chat_username}/{message_id}"
             else:
                 link = f"https://t.me/c/{str(chat_id)[4:]}/{message_id}"
             
@@ -356,19 +372,19 @@ class FreelanceHunterBot:
                     self.queue.put(message_data), 
                     timeout=5.0
                 )
-                logger.info(f"Сообщение {message_id} добавлено в очередь")
+                logger.info(f"✅ Сообщение #{message_id} прошло фильтры и добавлено в очередь для AI-анализа")
             except asyncio.TimeoutError:
-                logger.warning("Очередь переполнена, сообщение пропущено")
+                logger.warning(f"⚠️  Очередь переполнена, сообщение #{message_id} пропущено")
             
             # Пометка как обработанное
             await self.db.mark_processed(message_id, chat_id)
             
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
+            logger.error(f"❌ Ошибка обработки сообщения: {e}", exc_info=True)
     
     async def worker(self, worker_id: int):
         """Consumer: обработка сообщений из очереди"""
-        logger.info(f"Worker {worker_id} запущен")
+        logger.info(f"🔧 Worker {worker_id} запущен")
         
         while self.running:
             try:
@@ -378,21 +394,25 @@ class FreelanceHunterBot:
                     timeout=1.0
                 )
                 
-                logger.info(f"Worker {worker_id} обрабатывает сообщение {message_data.message_id}")
+                logger.info(f"🔄 Worker {worker_id} обрабатывает сообщение #{message_data.message_id}")
+                
+                # Логирование перед отправкой в OpenAI
+                text_preview = message_data.text[:100] + "..." if len(message_data.text) > 100 else message_data.text
+                logger.info(f"🤖 Отправляю сообщение #{message_data.message_id} на анализ в OpenAI: \"{text_preview}\"")
                 
                 # AI-анализ
                 analysis = await self.analyzer.analyze(message_data)
                 
                 if not analysis:
-                    logger.warning("AI-анализ не дал результата")
+                    logger.warning(f"⚠️  AI-анализ не дал результата для сообщения #{message_data.message_id}")
                     continue
                 
                 # Проверка на релевантность и тип
                 if analysis.type in ('order', 'vacancy') and analysis.relevance >= 70:
-                    logger.info(f"Найдено релевантное сообщение: {analysis.type}, {analysis.relevance}%")
+                    logger.info(f"🎯 Найдено релевантное сообщение #{message_data.message_id}: {analysis.type}, {analysis.relevance}%")
                     await self.notifier.send_notification(message_data, analysis)
                 else:
-                    logger.info(f"Сообщение не прошло фильтр: type={analysis.type}, relevance={analysis.relevance}")
+                    logger.info(f"📉 Сообщение #{message_data.message_id} не прошло фильтр: type={analysis.type}, relevance={analysis.relevance}%")
                 
                 # Пауза для защиты от флуда
                 await asyncio.sleep(random.uniform(0.5, 2.0))
@@ -403,10 +423,10 @@ class FreelanceHunterBot:
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
-                logger.error(f"Ошибка в worker {worker_id}: {e}", exc_info=True)
+                logger.error(f"❌ Ошибка в worker {worker_id}: {e}", exc_info=True)
                 await asyncio.sleep(1.0)
         
-        logger.info(f"Worker {worker_id} остановлен")
+        logger.info(f"🛑 Worker {worker_id} остановлен")
     
     async def run(self, num_workers: int = 2):
         """Запуск бота"""
@@ -493,8 +513,9 @@ app = FastAPI(
 
 
 @app.get("/")
+@app.head("/")
 async def root():
-    """Корневой эндпоинт для health check"""
+    """Корневой эндпоинт для health check (поддержка GET и HEAD)"""
     return JSONResponse({
         "status": "ok",
         "service": "Freelance Hunter Bot",
@@ -504,8 +525,9 @@ async def root():
 
 
 @app.get("/health")
+@app.head("/health")
 async def health_check():
-    """Health check для мониторинга"""
+    """Health check для мониторинга (поддержка GET и HEAD)"""
     if bot_instance and bot_instance.running:
         return JSONResponse({
             "status": "healthy",

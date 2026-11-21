@@ -18,5 +18,7 @@ services:
         sync: false
       - key: TARGET_CHATS
         sync: false
+      - key: SESSION_STRING
+        sync: false
       - key: PORT
         value: 10000
